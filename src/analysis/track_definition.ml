@@ -30,11 +30,6 @@
 open Std
 open Merlin_lib
 
-
-let section = Logger.section "locate"
-let info_log  x = Printf.ksprintf (Logger.info  section)  x
-let debug_log x = Printf.ksprintf (Logger.debug section)  x
-
 let sources_path = Fluid.from []
 let cfg_cmt_path = Fluid.from []
 let loadpath     = Fluid.from []
@@ -47,17 +42,17 @@ let erase_loadpath ~cwd ~new_path k =
       | "" ->
         (* That's the cwd at the time of the generation of the cmt, I'm
             guessing/hoping it will be the directory where we found it *)
-        Logger.debugf section ~title:"loadpath" Format.pp_print_string cwd ;
+        Logger.log "track_definition" "erase_loadpath" cwd;
         cwd
       | x ->
-        Logger.debugf section ~title:"loadpath" Format.pp_print_string x ;
+        Logger.log "track_definition" "erase_loadpath" x;
         x
     )
   in
   Fluid.let' loadpath str_path_list k
 
 let restore_loadpath k =
-  Logger.debug section ~title:"loadpath" "Restored load path" ;
+  Logger.log "track_definition" "restore_loadpath" "Restored load path";
   Fluid.let' loadpath (Fluid.get cfg_cmt_path) k
 
 module Fallback = struct
@@ -66,14 +61,14 @@ module Fallback = struct
   let get () = !fallback
 
   let set loc =
-    Logger.debugf section (fun fmt loc ->
-      Format.fprintf fmt "Fallback.set: " ;
-      Location.print_loc fmt loc
-    ) loc ;
+    Logger.logfmt "track_definition" "Fallback"
+      (fun fmt -> Format.fprintf fmt "Fallback.set: %a"
+          Location.print_loc loc);
     fallback := Some loc
 
   let setopt = function
-    | None -> debug_log "Fallback.setopt None"
+    | None ->
+      Logger.log "track_definition" "Fallback" "Fallback.setopt None"
     | Some loc -> set loc
 
   let reset () = fallback := None
@@ -169,7 +164,8 @@ end = struct
   let reset () = state := default
 
   let move_to ?digest file =
-    debug_log "File_switching.move_to %s" file ;
+    Logger.logf "track_definition" "File_switching.move_to"
+      "File_switching.move_to %s" file;
     state := { last_file_visited = Some file ; digest }
 
   let where_am_i () = !state.last_file_visited
@@ -264,17 +260,20 @@ let rec locate ?pos path trie =
   | Typedtrie.Resolves_to (new_path, fallback) ->
     begin match new_path with
     | (_, `Mod) :: _ ->
-      debug_log "resolves to %s" (Typedtrie.path_to_string new_path) ;
+      Logger.logf "track_definition" "locate"
+        "resolves to %s" (Typedtrie.path_to_string new_path);
       Fallback.setopt fallback ;
       from_path new_path
     | _ ->
-      debug_log "new path (%s) is not a real path. fallbacking..."
-        (Typedtrie.path_to_string new_path) ;
-      Logger.debugf section Typedtrie.dump trie ;
+      Logger.logf "track_definition" "locate"
+        "new path (%s) is not a real path. fallbacking..."
+        (Typedtrie.path_to_string new_path);
+      Logger.logfmt "track_definition" "locate"
+        (fun fmt -> Typedtrie.dump fmt trie);
       Option.map fallback ~f:(fun x -> x, None)
     end
   | Typedtrie.Alias_of (loc, new_path) ->
-    debug_log "alias of %s" (Typedtrie.path_to_string new_path) ;
+    Logger.log "track_definition" "alias of %s" (Typedtrie.path_to_string new_path) ;
     (* TODO: maybe give the option to NOT follow module aliases? *)
     Fallback.set loc;
     from_path new_path
@@ -282,12 +281,14 @@ let rec locate ?pos path trie =
 and browse_cmts ~root modules =
   let open Cmt_format in
   let cached = Cmt_cache.read root in
-  info_log "inspecting %s" root ;
+  Logger.logf "track_definition" "browse_cmts"
+    "inspecting %s" root ;
   File_switching.move_to ?digest:cached.Cmt_cache.cmt_infos.cmt_source_digest root ;
-  if cached.Cmt_cache.location_trie <> String.Map.empty then
-    let () = debug_log "cmt already cached" in
+  if cached.Cmt_cache.location_trie <> String.Map.empty then begin
+    Logger.log "track_definition" "browse_cmts"
+      "cmt already cached";
     locate modules cached.Cmt_cache.location_trie
-  else
+  end else
     match
       match cached.Cmt_cache.cmt_infos.cmt_annots with
       | Interface intf      -> `Browse (Browse_node.Signature intf)
@@ -315,8 +316,10 @@ and browse_cmts ~root modules =
     | `Pack files ->
       begin match modules with
       | (mod_name, `Mod) :: _ ->
-        assert (List.exists files ~f:(fun s -> Utils.file_path_to_mod_name s = mod_name)) ;
-        Logger.debug section ~title:"loadpath" "Saw packed module => erasing loadpath" ;
+        assert (List.exists files
+                  ~f:(fun s -> Utils.file_path_to_mod_name s = mod_name));
+        Logger.log "track_definition" "loadpath"
+          "Saw packed module => erasing loadpath" ;
         let new_path = cached.Cmt_cache.cmt_infos.cmt_loadpath in
         erase_loadpath ~cwd:(Filename.dirname root) ~new_path (fun () ->
           from_path modules
@@ -337,7 +340,7 @@ and browse_cmts ~root modules =
       "erased" loadpath, it could mean that we are looking for a persistent
       unit, and that's why we restore the initial loadpath. *)
 and from_path path =
-  debug_log "from_path '%s'" (Typedtrie.path_to_string path) ;
+  Logger.log "track_definition" "from_path '%s'" (Typedtrie.path_to_string path) ;
   match path with
   | [ fname, `Mod ] ->
     let save_digest_and_return root =
@@ -360,7 +363,8 @@ and from_path path =
              only need the cmt for the source digest in contains. Even if we
              don't have that we can blindly look for the source file and hope
              there are no duplicates. *)
-          info_log "failed to locate the cmt[i] of '%s'" fname ;
+          Logger.logf "track_definition" "from_path"
+            "failed to locate the cmt[i] of '%s'" fname;
           let pos = Lexing.make_pos ~pos_fname:fname (1, 0) in
           let loc = { Location. loc_start=pos ; loc_end=pos ; loc_ghost=true } in
           File_switching.move_to loc.Location.loc_start.Lexing.pos_fname ;
@@ -377,7 +381,8 @@ and from_path path =
           let cmt_file = Utils.find_file ~with_fallback:true (Preferences.cmt fname) in
           browse_cmts ~root:cmt_file modules
         with File.Not_found (File.CMT fname | File.CMTI fname) ->
-          info_log "failed to locate the cmt[i] of '%s'" fname ;
+          Logger.logf "track_definition" "from_path"
+            "failed to locate the cmt[i] of '%s'" fname;
           raise exn
       )
     end
@@ -410,32 +415,42 @@ let find_source loc =
     let dir = Filename.dirname s in
     match Utils.find_all_matches ~with_fallback file with
     | [] ->
-      debug_log "failed to find \"%s\" in source path (fallback = %b)"
-          filename with_fallback ;
-      debug_log "(for reference: fname = %S)" fname;
-      debug_log "looking in '%s'" dir ;
+      Logger.logf "track_definition" "find_source"
+        "failed to find \"%s\" in source path (fallback = %b)"
+        filename with_fallback ;
+      Logger.logf "track_definition" "find_source"
+        "(for reference: fname = %S)" fname;
+      Logger.logf "track_definition" "find_source"
+        "looking in '%s'" dir ;
       Some (Utils.find_file_with_path ~with_fallback file [dir])
     | [ x ] -> Some x
     | files ->
-      info_log "multiple files named %s exist in the source path..." filename;
+      Logger.logf "track_definition" "find_source"
+        "multiple files named %s exist in the source path..." filename;
       try
         match File_switching.source_digest () with
         | None ->
-          info_log "... no source digest available to select the right one" ;
+          Logger.logf "track_definition" "find_source"
+            "... no source digest available to select the right one" ;
           raise Not_found
         | Some digest ->
-          info_log "... trying to use source digest to find the right one" ;
-          debug_log "Source digest: %s" (Digest.to_hex digest) ;
+          Logger.log "track_definition" "find_source"
+            "... trying to use source digest to find the right one" ;
+          Logger.logf "track_definition" "find_source"
+            "Source digest: %s" (Digest.to_hex digest) ;
           Some (
             List.find files ~f:(fun f ->
-              let fdigest = Digest.file f in
-              debug_log "  %s (%s)" f (Digest.to_hex fdigest) ;
+                let fdigest = Digest.file f in
+                Logger.logf "track_definition" "find_source"
+ "  %s (%s)" f (Digest.to_hex fdigest) ;
               fdigest = digest
             )
           )
       with Not_found ->
-        info_log "... using heuristic to select the right one" ;
-        debug_log "we are looking for files in %s" dir ;
+        Logger.log "track_definition" "find_source"
+          "... using heuristic to select the right one";
+        Logger.logf "track_definition" "find_source"
+          "we are looking for files in %s" dir ;
         let rev = String.reverse (Filename.concat dir fname) in
         let lst =
           List.map files ~f:(fun path ->
@@ -512,36 +527,43 @@ let lookup ctxt ident env =
       try
         match namespace with
         | `Constr ->
-          info_log "lookup in constructor namespace" ;
+          Logger.log "track_definition" "lookup"
+            "lookup in constructor namespace" ;
           let cstr_desc = Env.lookup_constructor ident env in
           let path, loc = Raw_compat.path_and_loc_of_cstr cstr_desc env in
           let path = tag `Type path in (* TODO: Use [`Constr] here *)
           raise (Found (path, loc))
         | `Mod ->
-          info_log "lookup in module namespace" ;
+          Logger.log "track_definition" "lookup"
+            "lookup in module namespace" ;
           let path, _, _ = Raw_compat.lookup_module ident env in
           raise (Found (tag `Mod path, Location.symbol_gloc ()))
         | `Modtype ->
-          info_log "lookup in module type namespace" ;
+          Logger.log "track_definition" "lookup"
+            "lookup in module type namespace" ;
           let path, _ = Raw_compat.lookup_modtype ident env in
           raise (Found (tag `Modtype path, Location.symbol_gloc ()))
         | `Type ->
-          info_log "lookup in type namespace" ;
+          Logger.log "track_definition" "lookup"
+            "lookup in type namespace" ;
           let path, typ_decl = Env.lookup_type ident env in
           raise (Found (tag `Type path, typ_decl.Types.type_loc))
         | `Vals ->
-          info_log "lookup in value namespace" ;
+          Logger.log "track_definition" "lookup"
+            "lookup in value namespace" ;
           let path, val_desc = Env.lookup_value ident env in
           raise (Found (tag `Vals path, val_desc.Types.val_loc))
         | `Labels ->
-          info_log "lookup in label namespace" ;
+          Logger.log "track_definition" "lookup"
+            "lookup in label namespace" ;
           let label_desc = Env.lookup_label ident env in
           let path, loc = path_and_loc_from_label label_desc env in
           let path = tag `Type path in (* TODO: Use [`Labels] here *)
           raise (Found (path, loc))
       with Not_found -> ()
     ) ;
-    info_log "   ... not in the environment" ;
+    Logger.log "track_definition" "lookup"
+      "   ... not in the environment" ;
     raise Not_in_env
   with Found x ->
     x
@@ -551,17 +573,18 @@ let locate ~ml_or_mli ~path ~lazy_trie ~pos ~str_ident loc =
   Fallback.reset ();
   Preferences.set ml_or_mli;
   try
-    if not (Utils.is_ghost_loc loc) then `Found (loc, None) else
-      let () =
-        debug_log "present in the environment, but ghost lock.\n\
-                   walking up the typedtree looking for '%s'"
-          (Typedtrie.path_to_string path)
-      in
-      let trie = Lazy.force lazy_trie in
+    if not (Utils.is_ghost_loc loc) then `Found (loc, None)
+    else begin
+      Logger.logf "track_definition" "locate"
+        "present in the environment, but ghost lock.\n\
+         walking up the typedtree looking for '%s'"
+        (Typedtrie.path_to_string path);
+      let lazy trie = lazy_trie in
       match locate ~pos path trie with
       | None when Fallback.is_set () -> recover str_ident
       | None -> `Not_found (str_ident, File_switching.where_am_i ())
       | Some (loc, doc) -> `Found (loc, doc)
+    end
   with
   | _ when Fallback.is_set () -> recover str_ident
   | Not_found -> `Not_found (str_ident, File_switching.where_am_i ())
@@ -624,27 +647,28 @@ let inspect_pattern is_path_capitalized p =
 let inspect_context browse path pos =
   match Browse.enclosing pos browse with
   | None ->
-    Logger.infof section (fun fmt pos ->
-      Format.pp_print_string fmt "no enclosing around: " ;
-      Lexing.print_position fmt pos
-    ) pos ;
+    Logger.logfmt "track_definition" "inspect_context"
+      (fun fmt ->
+        Format.fprintf fmt "no enclosing around: %a"
+          Lexing.print_position pos);
     Some Unknown
   | Some enclosings ->
     let open Browse_node in
     let node = BrowseT.of_browse enclosings in
     match node.BrowseT.t_node with
     | Pattern p ->
-      Logger.debugf section (fun fmt p ->
-        Format.pp_print_string fmt "current node is: " ;
-        Printtyped.pattern 0 fmt p
-      ) p ;
+      Logger.logfmt "track_definition" "inspect_context"
+        (fun fmt ->
+           Format.fprintf fmt "current node is: %a"
+             (Printtyped.pattern 0) p);
       inspect_pattern (String.capitalize path = path) p
     | Value_description _
     | Type_declaration _
     | Extension_constructor _
     | Module_binding_name _
     | Module_declaration_name _ as node ->
-      debug_log "current node is : %s" @@ string_of_node node;
+      Logger.logf "track_definition" "inspect_context"
+        "current node is : %s" (string_of_node node);
       None
     | Core_type _ -> Some Type
     | Expression _ -> Some Expr
@@ -658,10 +682,12 @@ let from_string ~project ~env ~local_defs ~pos switch path =
   let lid = Longident.parse path in
   match inspect_context browse path pos with
   | None ->
-    info_log "already at origin, doing nothing" ;
+    Logger.log "track_definition" "from_string"
+      "already at origin, doing nothing" ;
     `At_origin
   | Some ctxt ->
-    info_log "looking for the source of '%s' (prioritizing %s files)" path
+    Logger.logf "track_definition" "from_string"
+      "looking for the source of '%s' (prioritizing %s files)" path
       (match switch with `ML -> ".ml" | `MLI -> ".mli") ;
     Fluid.let' sources_path (Project.source_path project) @@ fun () ->
     Fluid.let' cfg_cmt_path (Project.cmt_path project) @@ fun () ->
@@ -704,7 +730,8 @@ let get_doc ~project ~env ~local_defs ~comments ~pos source =
       | None ->
         `Found ({ Location. loc_start=pos; loc_end=pos ; loc_ghost=true }, None)
       | Some ctxt ->
-        info_log "looking for the doc of '%s'" path ;
+        Logger.logf "track_definition" "get_doc"
+          "looking for the doc of '%s'" path ;
         from_longident ~pos ~env ~lazy_trie ctxt `MLI lid
       end
   with
@@ -718,17 +745,14 @@ let get_doc ~project ~env ~local_defs ~comments ~pos source =
         let {Cmt_cache. cmt_infos} = Cmt_cache.read cmt_path in
         cmt_infos.Cmt_format.cmt_comments
     in
-    Logger.infof section (fun fmt () ->
-      Format.pp_print_string fmt "looking around ";
-      Location.print_loc fmt (Fluid.get last_location);
-      Format.pp_print_string fmt " inside: [\n";
-      List.iter comments ~f:(fun (c, l) ->
-        Format.fprintf fmt "  (%S, " c;
-        Location.print_loc fmt l;
-        Format.pp_print_string fmt ");\n"
+    Logger.logfmt "track_definition" "get_doc" (fun fmt ->
+        Format.fprintf fmt "looking around %a inside: [\n"
+          Location.print_loc (Fluid.get last_location);
+        List.iter comments ~f:(fun (c, l) ->
+            Format.fprintf fmt "  (%S, %a);\n" c
+              Location.print_loc l);
+        Format.fprintf fmt "]\n"
       );
-      Format.pp_print_string fmt "]\n"
-    ) ();
     begin match
       Ocamldoc.associate_comment comments loc (Fluid.get last_location)
     with
